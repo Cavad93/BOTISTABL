@@ -155,7 +155,8 @@ class Notifier:
             try:
                 lines.append(f"🤖 ARF p = {float(p):.3f}")
             except Exception:
-                pass
+                from error_logger import log_exception
+                log_exception("Unhandled exception")
 
         lines += [
             "— Условия:",
