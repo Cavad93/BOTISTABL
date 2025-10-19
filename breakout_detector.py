@@ -3,16 +3,31 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 import logging
+from ml_arf import extract_numeric_features
 
 logger = logging.getLogger(__name__)
 
 class BreakoutDetector:
-    def __init__(self, config, data_manager):
+    def __init__(self, config, data_manager, notifier=None, arf_model=None):
         """Инициализация детектора пробоев"""
         self.config = config
         self.data_manager = data_manager
+        self.notifier = notifier
+        self.arf_model = arf_model
         self.breakout_candidates = {}
         self.confirmed_breakouts = []
+
+    def _rsi(self, closes: pd.Series, period: int = 14) -> float:
+        if len(closes) < period + 1:
+            return float("nan")
+        delta = closes.diff()
+        up = delta.clip(lower=0.0)
+        down = (-delta).clip(lower=0.0)
+        roll_up = up.ewm(alpha=1/period, adjust=False).mean()
+        roll_down = down.ewm(alpha=1/period, adjust=False).mean()
+        rs = roll_up / (roll_down.replace(0, np.nan))
+        rsi = 100 - (100 / (1 + rs))
+        return float(rsi.iloc[-1])
     
     def check_breakout(self, symbol: str, levels: List[Dict], df: pd.DataFrame) -> Optional[Dict]:
         """
@@ -68,52 +83,115 @@ class BreakoutDetector:
         # Условие 1: Закрытие свечи выше уровня
         breakout_threshold = level_price * (1 + self.config.BREAKOUT_PERCENT)
         if current_candle['close'] <= breakout_threshold:
-            return None
+            return None  # единственный «жёсткий» стоп — цена не закрылась над уровнем
         
-        # Условие 2: Проверка объема
+        # Условие 2/3/4 — больше НЕ делаем ранних отказов:
+        # просто посчитаем их далее в блоке conditions и учтём в confidence_score.
         avg_volume = df['volume'].rolling(20).mean().iloc[-1]
         current_volume = current_candle['volume']
-        
-        if current_volume < avg_volume * self.config.VOLUME_SURGE_MULTIPLIER:
-            logger.debug(f"{symbol}: Недостаточный объем для пробоя")
-            return None
-        
-        # Условие 3: Подтверждение пробоя (X свечей закрылись выше уровня)
-        confirmations = 0
-        for _, candle in prev_candles.iterrows():
-            if candle['close'] > level_price:
-                confirmations += 1
-        
-        if confirmations < self.config.BREAKOUT_CONFIRMATION_CANDLES - 1:
-            # Добавляем в кандидаты для отслеживания
-            self._add_to_candidates(symbol, level, current_candle)
-            return None
-        
-        # Условие 4: RSI > 60
+        confirmations = sum(1 for _, candle in prev_candles.iterrows() if candle['close'] > level_price)
         rsi = self.data_manager.calculate_rsi(df['close'])
         current_rsi = rsi.iloc[-1]
-        
-        if current_rsi < self.config.RSI_THRESHOLD:
-            logger.debug(f"{symbol}: RSI слишком низкий: {current_rsi:.2f}")
-            return None
+        # self._add_to_candidates(symbol, level, current_candle)  # по желанию: можно оставить для трекинга, но без return
+
         
         # Все условия выполнены - пробой подтвержден
-        breakout_info = {
-            'symbol': symbol,
-            'level_price': level_price,
-            'breakout_price': current_candle['close'],
-            'volume_surge': current_volume / avg_volume,
-            'rsi': current_rsi,
-            'level_strength': level['strength'],
-            'level_types': level.get('types', [level.get('type', 'unknown')]),
-            'timestamp': current_candle.name if hasattr(current_candle, 'name') else datetime.now(),
-            'entry_price': self.data_manager.get_current_price(symbol),
-            'stop_loss': level_price * (1 - self.config.STOP_LOSS_PERCENT),
-            'take_profit': current_candle['close'] * (1 + self.config.TAKE_PROFIT_PERCENT),
-            'confidence_score': self._calculate_confidence_score(level, current_volume / avg_volume, current_rsi)
+# СТАЛО (добавлен расчёт условий, ARF p и Telegram-уведомление)
+        # условия пробоя
+        level_price = float(level["price"])
+        close_price = float(current_candle["close"])
+
+        # 1) закрытие выше уровня + процентный буфер
+        thr_pct = float(self.config.BREAKOUT_PERCENT)
+        delta_pct = (close_price - level_price) / level_price
+        cond_close = {
+            "passed": delta_pct > thr_pct,
+            "close": close_price,
+            "delta_pct": delta_pct,
+            "threshold_pct": thr_pct,
         }
-        
-        return breakout_info
+
+        # 2) всплеск объёма
+        vol_window = 20
+        current_volume = float(current_candle.get("volume", current_candle.get("quote_volume", 0.0)))
+        avg_volume = float(pd.to_numeric(df["volume"], errors="coerce").tail(vol_window).mean())
+        vol_mult = float(self.config.VOLUME_SURGE_MULTIPLIER)
+        cond_vol = {
+            "passed": (avg_volume > 0) and (current_volume / avg_volume >= vol_mult),
+            "current": current_volume,
+            "average": avg_volume if avg_volume > 0 else 0.0,
+            "multiplier": vol_mult,
+        }
+
+        # 3) RSI
+        rsi_val = self._rsi(pd.to_numeric(df["close"], errors="coerce"))
+        rsi_thr = int(self.config.RSI_THRESHOLD)
+        cond_rsi = {
+            "passed": (rsi_val >= rsi_thr) if np.isfinite(rsi_val) else False,
+            "value": rsi_val if np.isfinite(rsi_val) else float("nan"),
+            "threshold": rsi_thr,
+        }
+
+        # 4) подтверждающие свечи
+        need_candles = int(self.config.BREAKOUT_CONFIRMATION_CANDLES)
+        prev = df.tail(1 + need_candles).iloc[:-1]  # последние N до текущей
+        count_ok = int((pd.to_numeric(prev["close"], errors="coerce") > level_price).sum())
+        cond_conf = {
+            "passed": count_ok >= need_candles,
+            "count_ok": count_ok,
+            "required": need_candles,
+        }
+
+        # Все условия выполнены — пробой подтверждён
+        breakout_info = {
+            "symbol": symbol,
+            "timeframe": level.get("timeframe") or level.get("tf") or "",
+            "level_price": level_price,
+            "breakout_price": close_price,
+            "level_strength": level.get("strength", 0),
+            "level_types": level.get("types", [level.get("type", "unknown")]),
+            "timestamp": current_candle.name if hasattr(current_candle, "name") else datetime.now(),
+            "conditions": {
+                "close_above_level": cond_close,
+                "volume_surge": cond_vol,
+                "rsi": cond_rsi,
+                "confirmation_candles": cond_conf,
+            },
+        }
+
+        # ARF вероятность (если модель передана)
+        # ARF вероятность (если модель передана)
+        arf_p = None
+        if self.arf_model is not None:
+            try:
+                # собираем те же числовые фичи, что и в основном пайплайне
+                feats = {}
+                try:
+                    feats["score"] = float(level.get("score", 0.0))
+                except Exception:
+                    feats["score"] = 0.0
+
+                feats.update(extract_numeric_features(breakout_info, "brk_"))
+                feats.update(extract_numeric_features(level, "lvl_"))
+
+                # очистка NaN/inf — как в main.py
+                for k, v in list(feats.items()):
+                    if v != v or v in (float("inf"), float("-inf")):
+                        feats[k] = 0.0
+
+                arf_p = float(self.arf_model.predict_proba(feats))
+            except Exception as e:
+                logger.warning(f"{symbol}: ошибка расчёта ARF proba: {e}")
+        breakout_info["arf_proba"] = arf_p
+
+
+        # отправляем Telegram-уведомление с чек-листом
+        if self.notifier is not None:
+            try:
+                self.notifier.notify_breakout_conditions(breakout_info)
+            except Exception as e:
+                logger.warning(f"{symbol}: не удалось отправить уведомление о пробое: {e}")
+
     
     def _add_to_candidates(self, symbol: str, level: Dict, candle: pd.Series):
         """Добавление потенциального пробоя в кандидаты"""
@@ -144,11 +222,12 @@ class BreakoutDetector:
         # Компоненты оценки
         level_strength_score = level['strength']
         
-        # Нормализация объема (1.5x = 0.5, 3x = 1.0)
-        volume_score = min((volume_ratio - 1) / 2, 1.0)
-        
-        # Нормализация RSI (60 = 0.5, 80 = 1.0)
-        rsi_score = min((rsi - 60) / 20, 1.0)
+        # Нормализация объема (1.5x = 0.5, 3x = 1.0) с нижней отсечкой 0
+        volume_score = max(min((volume_ratio - 1) / 2, 1.0), 0.0)
+
+        # Нормализация RSI (60 = 0.5, 80 = 1.0) с нижней отсечкой 0
+        rsi_score = max(min((rsi - 60) / 20, 1.0), 0.0)
+
         
         # Вес подтверждений
         confirmations_score = min(level.get('confirmations', 1) / 3, 1.0)
