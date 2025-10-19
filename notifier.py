@@ -218,5 +218,90 @@ class Notifier:
 
         self._send_tg("\n".join(lines))
 
+    def notify_breakdown_conditions(self, info: dict):
+        """Уведомление о пробое поддержки ВНИЗ (для SHORT)"""
+        if not self.enabled:
+            return
 
+        def _fmt_bool(ok: bool) -> str:
+            return "✅" if ok else "❌"
+
+        conds = info.get("conditions", {})
+        cc = conds.get("close_below_level", {})
+        vc = conds.get("volume_surge", {})
+        rc = conds.get("rsi", {})
+        kc = conds.get("confirmation_candles", {})
+
+        lines: List[str] = [
+            f"🚨 ПРОБОЙ ВНИЗ (SHORT): {info.get('symbol')} {info.get('timeframe','')}".strip(),
+            f"Уровень: {info.get('level_price'):.6f}  →  Пробой @ {info.get('breakdown_price'):.6f}",
+            f"Сила уровня: {info.get('level_strength')}",
+        ]
+
+        p = info.get("arf_proba")
+        if p is not None:
+            try:
+                lines.append(f"🤖 ARF SHORT p = {float(p):.3f}")
+            except Exception:
+                pass
+
+        lines += [
+            "— Условия:",
+            f"{_fmt_bool(cc.get('passed', False))} Закрытие < уровня-Δ   "
+            f"(close={cc.get('close'):.6f}; Δ={cc.get('delta_pct'):.4f}; порог>{cc.get('threshold_pct'):.4f})",
+            f"{_fmt_bool(vc.get('passed', False))} Объём > средн×mult    "
+            f"({vc.get('current'):.2f}/{vc.get('average'):.2f}; mult×{vc.get('multiplier'):.2f})",
+            f"{_fmt_bool(rc.get('passed', False))} RSI ≤ порога          "
+            f"({rc.get('value'):.2f} ≤ {rc.get('threshold')})",
+            f"{_fmt_bool(kc.get('passed', False))} Подтверждающих свечей "
+            f"{kc.get('count_ok')}/{kc.get('required')}",
+        ]
+
+        # картинка уровня
+        try:
+            from charting import render_level_chart
+            symbol = info.get("symbol")
+            timeframe = info.get("timeframe", "15m")
+
+            if symbol and self.data_manager is not None and self.resistance_analyzer is not None:
+                min_days = getattr(self.cfg, "MIN_HISTORY_DAYS", 7)
+                df = self.data_manager.fetch_klines_full(symbol, timeframe, min_days)
+                if df is not None and not df.empty:
+                    # для SHORT используем поддержки, но resistance_analyzer может быть заменён на support_analyzer
+                    # временно используем resistance_analyzer для уровней
+                    levels_info = self.resistance_analyzer.find_resistance_levels(df, symbol)
+                    if isinstance(levels_info, dict):
+                        levels = (
+                            levels_info.get('combined')
+                            or levels_info.get('historical_peaks')
+                            or levels_info.get('horizontal_zones')
+                            or []
+                        )
+                    else:
+                        levels = []
+
+                    breakdown_info = {
+                        "breakout_price": (
+                            info.get("breakdown_price") or
+                            info.get("price")
+                        ),
+                        "ts": info.get("ts") or info.get("time"),
+                        "direction": "down"
+                    }
+                    max_bars = int(getattr(self.cfg, "SUMMARY_CHART_MAX_BARS", 220))
+                    img_bytes = render_level_chart(
+                        df=df,
+                        levels=levels,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        breakout=breakdown_info,
+                        max_bars=max_bars,
+                    )
+
+                    caption = f"📌 {symbol} ({timeframe}) — чек-лист пробоя ВНИЗ (SHORT)"
+                    self._send_tg_photo(caption=caption, photo_bytes=img_bytes, filename=f"{symbol}_{timeframe}_breakdown.png")
+        except Exception:
+            logger.exception("Не удалось подготовить/отправить график для чек-листа SHORT")
+
+        self._send_tg("\n".join(lines))
 
