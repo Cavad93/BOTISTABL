@@ -288,7 +288,8 @@ class DataManager:
         try:
             os.makedirs(os.path.dirname(self._paper_state_path), exist_ok=True)
         except Exception:
-            pass
+            from error_logger import log_exception
+            log_exception("Error in _ensure_state_dir")
 
     def _load_paper_state(self):
         self._ensure_state_dir()
