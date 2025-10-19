@@ -92,11 +92,7 @@ class BreakoutDetector:
         confirmations = sum(1 for _, candle in prev_candles.iterrows() if candle['close'] > level_price)
         rsi = self.data_manager.calculate_rsi(df['close'])
         current_rsi = rsi.iloc[-1]
-        # self._add_to_candidates(symbol, level, current_candle)  # по желанию: можно оставить для трекинга, но без return
-
         
-        # Все условия выполнены - пробой подтвержден
-# СТАЛО (добавлен расчёт условий, ARF p и Telegram-уведомление)
         # условия пробоя
         level_price = float(level["price"])
         close_price = float(current_candle["close"])
@@ -160,7 +156,6 @@ class BreakoutDetector:
         }
 
         # ARF вероятность (если модель передана)
-        # ARF вероятность (если модель передана)
         arf_p = None
         if self.arf_model is not None:
             try:
@@ -184,13 +179,15 @@ class BreakoutDetector:
                 logger.warning(f"{symbol}: ошибка расчёта ARF proba: {e}")
         breakout_info["arf_proba"] = arf_p
 
-
         # отправляем Telegram-уведомление с чек-листом
         if self.notifier is not None:
             try:
                 self.notifier.notify_breakout_conditions(breakout_info)
             except Exception as e:
                 logger.warning(f"{symbol}: не удалось отправить уведомление о пробое: {e}")
+        
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: возвращаем информацию о пробое
+        return breakout_info
 
     
     def _add_to_candidates(self, symbol: str, level: Dict, candle: pd.Series):
