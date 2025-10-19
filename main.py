@@ -280,12 +280,22 @@ class BreakoutTradingBot:
                     continue
 
                 # фильтр восходящего тренда (выше EMA200 - кандидат на разворот вниз)
+                # фильтр восходящего тренда (выше EMA200 - кандидат на разворот вниз)
                 if self.config.EXCLUDE_BELOW_EMA200 and len(df) >= 210:
                     ema200 = self.data_manager.calculate_ema(df['close'], 200)
                     if df['close'].iloc[-1] > ema200.iloc[-1]:
                         # для SHORT нам нужна цена ВЫШЕ EMA200, чтобы было куда падать
                         pass
                     else:
+                        continue
+
+                # фильтр силы тренда через ADX (для SHORT тоже нужен сильный тренд)
+                if self.config.ADX_FILTER_ENABLED and len(df) >= self.config.ADX_PERIOD + 20:
+                    adx = self.data_manager.calculate_adx(df, self.config.ADX_PERIOD)
+                    current_adx = adx.iloc[-1]
+                    if current_adx < self.config.ADX_MIN_THRESHOLD:
+                        # Слабый тренд - пропускаем SHORT
+                        logger.debug(f"{symbol} {timeframe} (SHORT): ADX={current_adx:.1f} < {self.config.ADX_MIN_THRESHOLD} - пропущено")
                         continue
 
                 levels = self.support_analyzer.find_support_levels(df, symbol)
