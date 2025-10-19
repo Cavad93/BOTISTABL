@@ -39,64 +39,63 @@ class ResistanceAnalyzer:
         return levels
     
     def _find_historical_peaks(self, df: pd.DataFrame) -> List[Dict]:
-        """
-        Поиск исторических максимумов
-        
-        Args:
-            df: DataFrame с данными
-        
-        Returns:
-            Список уровней с информацией о касаниях
-        """
-        levels = []
-        
-        # Поиск локальных максимумов
-        highs = df['high'].values
-        peaks, properties = find_peaks(highs, distance=10, prominence=highs.std() * 0.1)
-        
-        if len(peaks) > 0:
-            peak_prices = highs[peaks]
-            
-            # Кластеризация близких пиков
-            if len(peak_prices) > 1:
-                clustering = DBSCAN(eps=highs.std() * 0.01, min_samples=2)
-                peak_prices_reshaped = peak_prices.reshape(-1, 1)
-                clusters = clustering.fit_predict(peak_prices_reshaped)
-                
-                for cluster_id in set(clusters):
-                    if cluster_id != -1:  # Игнорируем шум
-                        cluster_peaks = peak_prices[clusters == cluster_id]
-                        level_price = np.mean(cluster_peaks)
-                        touches = len(cluster_peaks)
-                        
-                        if touches >= self.config.MIN_TOUCHES:
-                            levels.append({
-                                'price': level_price,
-                                'touches': touches,
-                                'strength': min(touches / 10, 1.0),  # Нормализованная сила
-                                'type': 'historical_peak',
-                                'last_touch': df.index[peaks[clusters == cluster_id][-1]]
-                            })
-            
-            # Добавление одиночных сильных пиков
-            for i, peak_idx in enumerate(peaks):
-                if len(clusters) == 0 or clusters[i] == -1:
-                    level_price = highs[peak_idx]
-                    
-                    # Проверка количества касаний
-                    tolerance = level_price * self.config.LEVEL_TOLERANCE
-                    touches = np.sum(np.abs(highs - level_price) <= tolerance)
-                    
-                    if touches >= self.config.MIN_TOUCHES:
-                        levels.append({
-                            'price': level_price,
-                            'touches': touches,
-                            'strength': min(touches / 10, 1.0),
-                            'type': 'historical_peak',
-                            'last_touch': df.index[peak_idx]
-                        })
-        
+        levels: List[Dict] = []
+
+        highs = df['high'].values.astype(float)
+        if highs.size == 0:
+            return levels
+
+        # базовый поиск локальных максимумов
+        peaks, _ = find_peaks(highs, distance=10, prominence=max(highs.std() * 0.1, 1e-12))
+        if len(peaks) == 0:
+            return levels
+
+        peak_prices = highs[peaks]
+
+        # по умолчанию считаем все пики "шумом" (кластер = -1), чтобы не падать при < 2 пика
+        clusters = np.full(shape=len(peaks), fill_value=-1, dtype=int)
+
+        # кластеризуем, только если пиков >= 2 и есть разброс
+        if len(peak_prices) > 1 and peak_prices.std() > 0:
+            eps = max(peak_prices.std() * 0.01, 1e-9)  # защитимся от eps=0
+            labels = DBSCAN(eps=eps, min_samples=2).fit_predict(peak_prices.reshape(-1, 1))
+            clusters = labels
+
+            # уровни из кластеров (подтверждённые множественными касаниями)
+            for cid in set(labels):
+                if cid == -1:
+                    continue
+                cluster_peaks = peak_prices[labels == cid]
+                level_price = float(np.mean(cluster_peaks))
+                tolerance = level_price * self.config.LEVEL_TOLERANCE
+                touches = int(np.sum(np.abs(highs - level_price) <= tolerance))
+                if touches >= self.config.MIN_TOUCHES:
+                    last_idx = peaks[labels == cid][-1]
+                    levels.append({
+                        'price': level_price,
+                        'touches': touches,
+                        'strength': min(touches / 10, 1.0),
+                        'type': 'historical_peak',
+                        'last_touch': df.index[last_idx]
+                    })
+
+        # одиночные/шумовые пики — как отдельные уровни
+        for i, peak_idx in enumerate(peaks):
+            if clusters[i] == -1:
+                level_price = float(highs[peak_idx])
+                tolerance = level_price * self.config.LEVEL_TOLERANCE
+                touches = int(np.sum(np.abs(highs - level_price) <= tolerance))
+                if touches >= self.config.MIN_TOUCHES:
+                    levels.append({
+                        'price': level_price,
+                        'touches': touches,
+                        'strength': min(touches / 10, 1.0),
+                        'type': 'historical_peak',
+                        'last_touch': df.index[peak_idx]
+                    })
+
         return sorted(levels, key=lambda x: x['strength'], reverse=True)
+
     
     def _find_horizontal_zones(self, df: pd.DataFrame) -> List[Dict]:
         """
