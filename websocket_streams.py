@@ -28,7 +28,8 @@ class WebsocketStreams:
                 if msg.get('e') == '24hrMiniTicker':
                     self.dm.last_price[symbol] = float(msg['c'])
             except Exception:
-                pass
+                from error_logger import log_exception
+                log_exception("Error in subscribe_symbol")
         try:
             self.symbol_handlers[sym_l] = self.twm.start_symbol_miniticker_socket(callback=_cb, symbol=symbol)
         except Exception as e:
@@ -39,4 +40,5 @@ class WebsocketStreams:
             if self.twm:
                 self.twm.stop()
         except Exception:
-            pass
+            from error_logger import log_exception
+            log_exception("Error in stop")
