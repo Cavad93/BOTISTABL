@@ -56,7 +56,7 @@ class Config:
     FIBONACCI_LEVELS = [float(x) for x in os.getenv('FIBONACCI_LEVELS', '0.236,0.382,0.5,0.618,0.786').split(',')]
 
     # ===== Критерии пробоя =====
-    BREAKOUT_PERCENT = float(os.getenv('BREAKOUT_PERCENT', '0.002'))  # 0.2% буфер
+    BREAKOUT_PERCENT = float(os.getenv('BREAKOUT_PERCENT', '0.001'))  # 0.2% буфер
     VOLUME_SURGE_MULTIPLIER = float(os.getenv('VOLUME_SURGE_MULTIPLIER', '1.2'))  # 120% среднего
     BREAKOUT_CONFIRMATION_CANDLES = int(os.getenv('BREAKOUT_CONFIRMATION_CANDLES', '1'))  # достаточно 1
     RSI_THRESHOLD = int(os.getenv('RSI_THRESHOLD', '55'))
@@ -88,7 +88,7 @@ class Config:
     TG_CHAT_ID = os.getenv('TG_CHAT_ID', '')
 
     # ===== Фильтры =====
-    EXCLUDE_BELOW_EMA200 = os.getenv('EXCLUDE_BELOW_EMA200', 'true').lower() == 'true'
+    EXCLUDE_BELOW_EMA200 = os.getenv('EXCLUDE_BELOW_EMA200', 'false').lower() == 'false'
     CORRELATION_WINDOW = int(os.getenv('CORRELATION_WINDOW', '100'))
     MAX_MEAN_CORRELATION = float(os.getenv('MAX_MEAN_CORRELATION', '0.8'))
 
@@ -105,7 +105,7 @@ class Config:
     ARF_SEED         = int(os.getenv("ARF_SEED", "42"))
 
     # Порог входа по ML
-    ARF_ENTRY_PROBA = float(os.getenv("ARF_ENTRY_PROBA", "0.62"))
+    ARF_ENTRY_PROBA = float(os.getenv("ARF_ENTRY_PROBA", "0.55"))
 
     # WARMUP: сколько финальных исходов (закрытых сделок) накопить, прежде чем
     # включать ML-гейтинг p>=ARF_ENTRY_PROBA. Пока меньше — входим по базовому правилу.
