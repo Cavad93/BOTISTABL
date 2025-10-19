@@ -135,7 +135,8 @@ class BreakoutTradingBot:
         try:
             schedule.clear()
         except Exception:
-            pass
+            from error_logger import log_exception
+            log_exception("Error in stop")
         try:
             self.ws.stop()
         except Exception:
@@ -487,7 +488,8 @@ def main():
         try:
             bot.stop()
         except Exception:
-            pass
+            from error_logger import log_exception
+            log_exception("Error in main")
 
 
 if __name__ == "__main__":
