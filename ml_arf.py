@@ -132,7 +132,8 @@ class ARFModel:
                 try:
                     self._calib.update(p_raw, int(bool(y)))
                 except Exception:
-                    pass
+                    from error_logger import log_exception
+                    log_exception("Failed to update")
 
             self.model.learn_one(x, bool(y))
             self._updates += 1
@@ -169,7 +170,8 @@ class ARFModel:
                 print(f"[ARF] using forest.ARFClassifier (args={kwargs})")
                 return model
             except Exception:
-                pass
+                from error_logger import log_exception
+                log_exception("Unhandled exception")
 
         # 1b) фолбэк — AdaptiveRandomForestClassifier (ensemble.*)
         if prefer in ("auto", "arf") and hasattr(ensemble, "AdaptiveRandomForestClassifier"):
@@ -184,7 +186,8 @@ class ARFModel:
                 print(f"[ARF] using ensemble.AdaptiveRandomForestClassifier (n={n_models}, seed={seed}) [fallback]")
                 return model
             except Exception:
-                pass
+                from error_logger import log_exception
+                log_exception("Unhandled exception")
 
         # 2) SRP, если явно выбран или доступен в auto
         if prefer in ("auto", "srp") and hasattr(ensemble, "StreamingRandomPatchesClassifier"):
@@ -197,7 +200,8 @@ class ARFModel:
                 print(f"[ARF] using ensemble.StreamingRandomPatchesClassifier (n={n_models}, seed={seed})")
                 return model
             except Exception:
-                pass
+                from error_logger import log_exception
+                log_exception("Unhandled exception")
 
         # 3) Баггинг — финальный фолбэк
         if hasattr(ensemble, "BaggingClassifier"):
@@ -216,7 +220,8 @@ class ARFModel:
                 print(f"[ARF] using ensemble.BaggingClassifier(HoeffdingTree) (args={kwargs})")
                 return model
             except Exception:
-                pass
+                from error_logger import log_exception
+                log_exception("Unhandled exception")
 
         raise RuntimeError("Не найден подходящий ансамбль в river.ensemble / river.forest")
 
@@ -253,7 +258,8 @@ class ARFModel:
                     f,
                 )
         except Exception:
-            pass
+            from error_logger import log_exception
+            log_exception("Unhandled exception")
 
     def _load(self):
         # модель
@@ -263,7 +269,8 @@ class ARFModel:
                     self.model = pickle.load(f)
                 print(f"[ARF] state loaded from {self.state_path}")
             except Exception:
-                pass
+                from error_logger import log_exception
+                log_exception("Failed to load pickle")
 
         # мета
         meta_path = self.state_path + ".meta.json"
@@ -285,9 +292,11 @@ class ARFModel:
                     self._calib.use_logit = bool(cal.get("use_logit", self._calib.use_logit))
                     self.calib_min_labels = int(cal.get("min_labels", self.calib_min_labels))
                 except Exception:
-                    pass
+                    from error_logger import log_exception
+                    log_exception("Unhandled exception")
             except Exception:
-                pass
+                from error_logger import log_exception
+                log_exception("Unhandled exception")
 
 
 def extract_numeric_features(d: Any, prefix: str = "") -> Dict[str, float]:
