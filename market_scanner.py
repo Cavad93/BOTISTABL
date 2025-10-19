@@ -57,6 +57,15 @@ class MarketScanner:
                     if df['close'].iloc[-1] < ema200.iloc[-1]:
                         continue
 
+                # фильтр силы тренда через ADX
+                if self.config.ADX_FILTER_ENABLED and len(df) >= self.config.ADX_PERIOD + 20:
+                    adx = self.data_manager.calculate_adx(df, self.config.ADX_PERIOD)
+                    current_adx = adx.iloc[-1]
+                    if current_adx < self.config.ADX_MIN_THRESHOLD:
+                        # Слабый тренд или боковое движение - пропускаем
+                        logger.debug(f"{symbol} {timeframe}: ADX={current_adx:.1f} < {self.config.ADX_MIN_THRESHOLD} - пропущено")
+                        continue
+
                 levels = self.resistance_analyzer.find_resistance_levels(df, symbol)
                 combined = levels.get('combined', [])
                 if not combined:
