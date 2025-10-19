@@ -205,6 +205,52 @@ class DataManager:
     def calculate_ema(self, prices: pd.Series, period: int) -> pd.Series:
         return prices.ewm(span=period, adjust=False).mean()
 
+    def calculate_adx(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """
+        Расчет Average Directional Index (ADX) - индикатора силы тренда.
+        ADX > 25 обычно указывает на наличие сильного тренда.
+        ADX < 20 указывает на слабый тренд или боковое движение.
+        
+        Args:
+            df: DataFrame с колонками 'high', 'low', 'close'
+            period: Период для расчета (обычно 14)
+        
+        Returns:
+            Series со значениями ADX
+        """
+        try:
+            high = df['high'].astype(float)
+            low = df['low'].astype(float)
+            close = df['close'].astype(float)
+            
+            # Расчет True Range (TR)
+            high_low = high - low
+            high_close = abs(high - close.shift(1))
+            low_close = abs(low - close.shift(1))
+            true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+            
+            # Расчет направленного движения +DM и -DM
+            plus_dm = high.diff()
+            minus_dm = -low.diff()
+            
+            # Обнуляем отрицательные значения
+            plus_dm[plus_dm < 0] = 0
+            minus_dm[minus_dm < 0] = 0
+            
+            # Сглаживание по методу Wilder
+            atr = true_range.ewm(alpha=1/period, adjust=False).mean()
+            plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr)
+            minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr)
+            
+            # Расчет DX и ADX
+            dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+            adx = dx.ewm(alpha=1/period, adjust=False).mean()
+            
+            return adx
+        except Exception as e:
+            logger.error(f"Ошибка расчета ADX: {e}")
+            return pd.Series(index=df.index, dtype=float)
+
     # ---------- Цены и стаканы ----------
     def get_current_price(self, symbol: str) -> float:
         try:
