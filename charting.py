@@ -100,7 +100,8 @@ def render_level_chart(
                 if direction.startswith('down'):
                     mrk = 'v'
             except Exception:
-                pass
+                from error_logger import log_exception
+                log_exception("Unhandled exception")
             addplots.append(
                 mpf.make_addplot(
                     s,
@@ -140,5 +141,6 @@ def render_level_chart(
         import matplotlib.pyplot as plt
         plt.close(fig)
     except Exception:
-        pass
+        from error_logger import log_exception
+        log_exception("Failed to import matplotlib")
     return png_bytes
