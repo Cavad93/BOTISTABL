@@ -321,3 +321,28 @@ def extract_numeric_features(d: Any, prefix: str = "") -> Dict[str, float]:
 # (в логах встречалась попытка импортировать extract_numeric_feature)
 def extract_numeric_feature(d: Any, prefix: str = "") -> Dict[str, float]:
     return extract_numeric_features(d, prefix)
+
+
+# ===== Фабрика для создания SHORT и LONG ARF моделей =====
+
+def create_arf_long(cfg) -> ARFModel:
+    """Создаёт ARF модель для LONG позиций"""
+    return ARFModel(cfg)
+
+
+def create_arf_short(cfg) -> ARFModel:
+    """
+    Создаёт отдельную ARF модель для SHORT позиций.
+    Использует отдельный state_path, чтобы не пересекаться с LONG моделью.
+    """
+    # создаём копию конфига с изменённым путём для SHORT
+    import copy
+    cfg_short = copy.copy(cfg)
+    
+    # меняем путь для state SHORT модели
+    original_path = getattr(cfg, "ARF_STATE_PATH", "ml_state/arf_model.pkl")
+    short_path = original_path.replace(".pkl", "_short.pkl")
+    cfg_short.ARF_STATE_PATH = short_path
+    
+    logger.info(f"[ARF SHORT] Инициализация с путём: {short_path}")
+    return ARFModel(cfg_short)
