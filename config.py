@@ -122,6 +122,23 @@ class Config:
     # Путь для CSV-лога закрытых сделок
     TRADES_LOG_PATH = os.getenv('TRADES_LOG_PATH', os.path.join('state', 'trades.csv'))
     # Количество графиков с уровнями в сводке
+# Количество графиков с уровнями в сводке
     SUMMARY_CHART_TOPN = int(os.getenv('SUMMARY_CHART_TOPN', '5'))
     # Сколько баров показывать на картинке
     SUMMARY_CHART_MAX_BARS = int(os.getenv('SUMMARY_CHART_MAX_BARS', '220'))
+    
+    # ===== SHORT торговля =====
+    # Включить/выключить SHORT торговлю
+    SHORT_TRADING_ENABLED = os.getenv('SHORT_TRADING_ENABLED', 'true').lower() == 'true'
+    
+    # RSI порог для SHORT (должен быть низким, например 45)
+    RSI_THRESHOLD_SHORT = int(os.getenv('RSI_THRESHOLD_SHORT', '45'))
+    
+    # Путь к ARF модели для SHORT
+    ARF_SHORT_STATE_PATH = os.getenv("ARF_SHORT_STATE_PATH", "ml_state/arf_model_short.pkl")
+    
+    # Порог входа по ML для SHORT
+    ARF_ENTRY_PROBA_SHORT = float(os.getenv("ARF_ENTRY_PROBA_SHORT", "0.55"))
+    
+    # WARMUP для SHORT ARF
+    ARF_WARMUP_LABELS_SHORT = int(os.getenv("ARF_WARMUP_LABELS_SHORT", "50"))
