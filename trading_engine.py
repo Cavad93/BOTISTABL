@@ -22,8 +22,9 @@ class Position:
     partial_sizes: List[float]
     filled_partials: List[bool]
     status: str = "ACTIVE"
-    ml_features: Optional[Dict[str, float]] = None  # признаки для ML (переживают рестарт)
-    ml_pred: Optional[float] = None                 # предсказание ML на входе (переживает рестарт)
+    ml_features: Optional[Dict[str, float]] = None
+    ml_pred: Optional[float] = None
+    direction: str = "LONG"  # НОВОЕ ПОЛЕ: "LONG" или "SHORT"         # предсказание ML на входе (переживает рестарт)
 
 
 class TradingEngine:
@@ -99,7 +100,8 @@ class TradingEngine:
         ml_pred: Optional[float] = None,
     ) -> Optional[Position]:
         """
-        Открывает позицию, сохраняет её в state, возвращает Position или None при ошибке.
+        Открывает позицию (LONG или SHORT), сохраняет её в state.
+        Направление определяется по breakout_info['direction'].
         """
         if not self.can_open_new_position() or not self.portfolio_risk_check():
             logger.warning("Нельзя открыть новую позицию: ограничение риска/кол-ва позиций")
@@ -112,10 +114,16 @@ class TradingEngine:
             logger.warning("Размер позиции получился 0 — вход отменён")
             return None
 
+        # определяем направление: LONG (по умолчанию) или SHORT
+        direction = str(breakout_info.get("direction", "LONG")).upper()
+        
         paper = str(getattr(self.cfg, "TRADING_MODE", "PAPER")).upper() != "LIVE"
-        order = self.dm.place_market_order(symbol, "BUY", qty, paper=paper)
+        
+        # для SHORT открываем SELL ордер
+        side = "SELL" if direction == "SHORT" else "BUY"
+        order = self.dm.place_market_order(symbol, side, qty, paper=paper)
         if not order:
-            logger.warning("Не удалось разместить ордер на вход")
+            logger.warning(f"Не удалось разместить ордер на вход ({side})")
             return None
 
         pos = Position(
@@ -130,11 +138,13 @@ class TradingEngine:
             filled_partials=[False] * len(getattr(self.cfg, "PARTIAL_TP_SIZES", [])),
             ml_features=ml_features,
             ml_pred=ml_pred,
+            direction=direction,  # сохраняем направление
         )
         self.positions.append(pos)
         self._save_positions_state()
 
-        logger.info(f"📈 Открыта позиция: {symbol} qty={qty} @ {price:.6f}")
+        emoji = "📉" if direction == "SHORT" else "📈"
+        logger.info(f"{emoji} Открыта {direction} позиция: {symbol} qty={qty} @ {price:.6f}")
         if self.notifier:
             try:
                 self.notifier.notify_trade_opened(pos)
@@ -148,7 +158,7 @@ class TradingEngine:
     def manage_positions(self):
         """
         Вызывается периодически: частичные TP, трейлинг, SL/TP закрытия.
-        На финальном закрытии вызывает on_position_closed(pos, success: bool).
+        Теперь поддерживает LONG и SHORT позиции.
         """
         paper = str(getattr(self.cfg, "TRADING_MODE", "PAPER")).upper() != "LIVE"
 
@@ -157,58 +167,92 @@ class TradingEngine:
                 continue
 
             current = float(self.dm.get_current_price(pos.symbol))
+            direction = getattr(pos, "direction", "LONG").upper()
 
-            # Частичные TP
+            # ===== Частичные TP =====
             for i, (thr, share) in enumerate(zip(pos.partial_tps, pos.partial_sizes)):
-                if not pos.filled_partials[i] and current >= pos.entry_price * (1.0 + float(thr)):
+                # для LONG: TP когда цена ВЫШЕ входа
+                # для SHORT: TP когда цена НИЖЕ входа
+                tp_triggered = False
+                if direction == "LONG":
+                    tp_triggered = current >= pos.entry_price * (1.0 + float(thr))
+                else:  # SHORT
+                    tp_triggered = current <= pos.entry_price * (1.0 - float(thr))
+                
+                if not pos.filled_partials[i] and tp_triggered:
+                    # для LONG частично SELL, для SHORT частично BUY
+                    close_side = "SELL" if direction == "LONG" else "BUY"
                     sell_qty = round(pos.qty * float(share), 6)
                     if sell_qty > 0:
-                        self.dm.place_market_order(pos.symbol, "SELL", sell_qty, paper=paper)
+                        self.dm.place_market_order(pos.symbol, close_side, sell_qty, paper=paper)
                         pos.qty = max(0.0, round(pos.qty - sell_qty, 6))
                         pos.filled_partials[i] = True
                         self._save_positions_state()
-                        logger.info(f"⚖️ Частичная фиксация {pos.symbol}: {share*100:.0f}% @ +{thr*100:.1f}% (rem={pos.qty:.6f})")
+                        sign = "+" if direction == "LONG" else "-"
+                        logger.info(f"⚖️ Частичная фиксация {pos.symbol} ({direction}): {share*100:.0f}% @ {sign}{thr*100:.1f}% (rem={pos.qty:.6f})")
                         if self.notifier:
                             try:
                                 self.notifier.notify_partial_tp(pos, float(thr), sell_qty, current)
                             except Exception:
                                 logger.exception("notify_partial_tp failed")
 
-            # Трейлинг-стоп
+            # ===== Трейлинг-стоп =====
             trailing_start = float(getattr(self.cfg, "TRAILING_START", 0.0))
             trailing_step = float(getattr(self.cfg, "TRAILING_STEP", 0.0))
             if trailing_start > 0 and trailing_step > 0:
-                gain = (current - pos.entry_price) / pos.entry_price
-                if gain >= trailing_start:
-                    new_sl = max(pos.stop_loss, current * (1.0 - trailing_step))
-                    if new_sl > pos.stop_loss:
-                        pos.stop_loss = float(new_sl)
-                        self._save_positions_state()
-                        logger.info(f"🔧 Трейлинг-стоп подтянут: {pos.symbol} SL={pos.stop_loss:.6f}")
-                        if self.notifier:
-                            try:
-                                self.notifier.notify_trailing(pos)
-                            except Exception:
-                                logger.exception("notify_trailing failed")
+                if direction == "LONG":
+                    gain = (current - pos.entry_price) / pos.entry_price
+                    if gain >= trailing_start:
+                        new_sl = max(pos.stop_loss, current * (1.0 - trailing_step))
+                        if new_sl > pos.stop_loss:
+                            pos.stop_loss = float(new_sl)
+                            self._save_positions_state()
+                            logger.info(f"🔧 Трейлинг-стоп подтянут (LONG): {pos.symbol} SL={pos.stop_loss:.6f}")
+                            if self.notifier:
+                                try:
+                                    self.notifier.notify_trailing(pos)
+                                except Exception:
+                                    logger.exception("notify_trailing failed")
+                else:  # SHORT
+                    gain = (pos.entry_price - current) / pos.entry_price
+                    if gain >= trailing_start:
+                        new_sl = min(pos.stop_loss, current * (1.0 + trailing_step))
+                        if new_sl < pos.stop_loss:
+                            pos.stop_loss = float(new_sl)
+                            self._save_positions_state()
+                            logger.info(f"🔧 Трейлинг-стоп подтянут (SHORT): {pos.symbol} SL={pos.stop_loss:.6f}")
+                            if self.notifier:
+                                try:
+                                    self.notifier.notify_trailing(pos)
+                                except Exception:
+                                    logger.exception("notify_trailing failed")
 
-            # SL / TP — финальные выходы
-            if current <= pos.stop_loss:
-                self._final_close(pos, reason="STOP", paper=paper)
-            elif current >= pos.take_profit:
-                self._final_close(pos, reason="TP", paper=paper)
+            # ===== SL / TP — финальные выходы =====
+            if direction == "LONG":
+                if current <= pos.stop_loss:
+                    self._final_close(pos, reason="STOP", paper=paper)
+                elif current >= pos.take_profit:
+                    self._final_close(pos, reason="TP", paper=paper)
+            else:  # SHORT
+                if current >= pos.stop_loss:
+                    self._final_close(pos, reason="STOP", paper=paper)
+                elif current <= pos.take_profit:
+                    self._final_close(pos, reason="TP", paper=paper)
 
     def _final_close(self, pos: Position, reason: str, paper: bool):
         """
-        Единая точка финального закрытия (TP/SL). Вызывает ML-колбэк, персистит состояние
-        и дописывает результат сделки в CSV-лог.
+        Единая точка финального закрытия (TP/SL). Поддерживает LONG и SHORT.
         """
         exit_price: Optional[float] = None
         closed_qty: float = float(pos.qty)
+        direction = getattr(pos, "direction", "LONG").upper()
 
         try:
             if pos.qty > 0:
-                order = self.dm.place_market_order(pos.symbol, "SELL", pos.qty, paper=paper)
-                # Пытаемся взять цену выхода из ответа биржи/симулятора
+                # для LONG закрываем через SELL, для SHORT через BUY
+                close_side = "SELL" if direction == "LONG" else "BUY"
+                order = self.dm.place_market_order(pos.symbol, close_side, pos.qty, paper=paper)
+                
                 try:
                     if isinstance(order, dict):
                         fills = order.get("fills") or []
@@ -216,25 +260,24 @@ class TradingEngine:
                             exit_price = float(fills[0]["price"])
                 except Exception:
                     exit_price = None
-                # Фолбэк: берём текущую рыночную цену
+                
                 if not exit_price or exit_price <= 0:
                     exit_price = float(self.dm.get_current_price(pos.symbol))
                 pos.qty = 0.0
         except Exception:
-            logger.exception("Не удалось отправить SELL на финальном закрытии")
+            logger.exception(f"Не удалось отправить {close_side} на финальном закрытии")
 
         if reason == "TP":
             pos.status = "PROFIT"
             success = True
             log_fn = logger.info
-            log_msg = f"✅ Take-Profit достигнут для {pos.symbol}"
+            log_msg = f"✅ Take-Profit достигнут для {pos.symbol} ({direction})"
         else:
             pos.status = "STOPPED"
             success = False
             log_fn = logger.warning
-            log_msg = f"❌ Stop-Loss сработал для {pos.symbol}"
+            log_msg = f"❌ Stop-Loss сработал для {pos.symbol} ({direction})"
 
-        # ✍️ Запишем сделку в CSV-лог (даже если цена фолбэкнулась с текущего тикера)
         try:
             self._append_trade_result(pos, reason, exit_price, closed_qty)
         except Exception:
@@ -249,7 +292,6 @@ class TradingEngine:
             except Exception:
                 logger.exception("notify_closed failed")
 
-        # Колбэк для онлайн-обучения ARF: success=True (TP) / False (SL)
         cb = getattr(self, "on_position_closed", None)
         if callable(cb):
             try:
@@ -265,7 +307,7 @@ class TradingEngine:
 
     def _append_trade_result(self, pos: Position, reason: str, exit_price: Optional[float], closed_qty: float):
         """
-        Добавляет строку в CSV-лог закрытых сделок.
+        Добавляет строку в CSV-лог закрытых сделок. Поддерживает LONG и SHORT.
         """
         path = self._trades_log_path()
         try:
@@ -276,8 +318,15 @@ class TradingEngine:
         exit_px = float(exit_price) if exit_price else float(self.dm.get_current_price(pos.symbol))
         entry_px = float(pos.entry_price)
         qty = float(closed_qty)
-        pnl_usdt = (exit_px - entry_px) * qty
-        pnl_pct = (exit_px / entry_px - 1.0) * 100.0
+        direction = getattr(pos, "direction", "LONG").upper()
+        
+        # расчёт PnL с учётом направления
+        if direction == "LONG":
+            pnl_usdt = (exit_px - entry_px) * qty
+            pnl_pct = (exit_px / entry_px - 1.0) * 100.0
+        else:  # SHORT
+            pnl_usdt = (entry_px - exit_px) * qty
+            pnl_pct = (entry_px / exit_px - 1.0) * 100.0
 
         duration_sec = None
         try:
@@ -289,7 +338,8 @@ class TradingEngine:
         row = {
             "close_time": datetime.now().isoformat(timespec="seconds"),
             "symbol": pos.symbol,
-            "reason": reason,                         # "TP" или "STOP"
+            "direction": direction,  # НОВОЕ ПОЛЕ
+            "reason": reason,
             "qty": f"{qty:.6f}",
             "entry_price": f"{entry_px:.6f}",
             "exit_price": f"{exit_px:.6f}",
@@ -305,7 +355,7 @@ class TradingEngine:
                 writer = csv.DictWriter(
                     f,
                     fieldnames=[
-                        "close_time","symbol","reason","qty",
+                        "close_time","symbol","direction","reason","qty",  # direction добавлен
                         "entry_price","exit_price","pnl_usdt","pnl_pct",
                         "duration_sec","ml_pred",
                     ],
