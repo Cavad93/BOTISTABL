@@ -5,9 +5,13 @@ import pickle
 import threading
 import inspect
 import math
+import logging
 from typing import Dict, Any
 
 from river import ensemble, tree, forest
+
+logger = logging.getLogger(__name__)
+
 
 
 class SigmoidCalibrator:
