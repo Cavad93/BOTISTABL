@@ -9,250 +9,118 @@ logger = logging.getLogger(__name__)
 
 class MarketScanner:
     def __init__(self, config, data_manager, resistance_analyzer, breakout_detector):
-        """Инициализация сканера рынка"""
         self.config = config
         self.data_manager = data_manager
         self.resistance_analyzer = resistance_analyzer
         self.breakout_detector = breakout_detector
-        self.market_snapshot = {}
-        self.breakout_opportunities = []
-    
+
+        self.market_snapshot: Dict[str, Dict] = {}
+        self.breakout_opportunities: List[Dict] = []
+
     def scan_market(self) -> List[Dict]:
-        """
-        Полное сканирование рынка
-        
-        Returns:
-            Список потенциальных возможностей для входа
-        """
         logger.info("Начинаю сканирование рынка...")
-        
-        # Получаем список топовых монет
-        top_coins = self.data_manager.get_top_coins(
-            self.config.TOP_COINS_COUNT,
-            self.config.MIN_VOLUME_24H
-        )
-        
+        top_coins = self.data_manager.get_top_coins(self.config.TOP_COINS_COUNT, self.config.MIN_VOLUME_24H)
         if not top_coins:
             logger.error("Не удалось получить список монет")
             return []
-        
+
         logger.info(f"Анализирую {len(top_coins)} монет...")
-        
-        # Параллельный анализ монет
-        opportunities = []
+        opportunities: List[Dict] = []
         with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_symbol = {
-                executor.submit(self._analyze_symbol, symbol): symbol 
+                executor.submit(self._analyze_symbol, symbol): symbol
                 for symbol in top_coins
             }
-            
             for future in as_completed(future_to_symbol):
-                symbol = future_to_symbol[future]
-                try:
-                    result = future.result()
-                    if result:
-                        opportunities.append(result)
-                except Exception as e:
-                    logger.error(f"Ошибка анализа {symbol}: {e}")
-        
-        # Сортировка по потенциалу
-        opportunities.sort(key=lambda x: x.get('score', 0), reverse=True)
-        
-        # Сохранение результатов
-        self.breakout_opportunities = opportunities[:20]  # Топ-20 возможностей
-        
-        logger.info(f"Найдено {len(opportunities)} потенциальных возможностей")
-        
-        return self.breakout_opportunities
-    
+                res = future.result()
+                if res:
+                    opportunities.append(res)
+
+        opportunities.sort(key=lambda x: x['score'], reverse=True)
+        self.breakout_opportunities = opportunities
+        return opportunities
+
     def _analyze_symbol(self, symbol: str) -> Optional[Dict]:
-        """
-        Анализ отдельной торговой пары
-        
-        Args:
-            symbol: Символ торговой пары
-        
-        Returns:
-            Информация о возможности или None
-        """
         try:
-            analysis_result = {
-                'symbol': symbol,
-                'timestamp': datetime.now(),
-                'timeframes': {}
-            }
-            
+            analysis_result: Dict = {'symbol': symbol, 'timestamp': datetime.now(), 'timeframes': {}}
             best_opportunity = None
             max_score = 0
-            
-            # Анализ на разных таймфреймах
+
             for timeframe in self.config.TIMEFRAMES:
-                # Получение данных
-                df = self.data_manager.get_klines(symbol, timeframe, limit=500)
-                
+                df = self.data_manager.fetch_klines_full(symbol, timeframe, self.config.MIN_HISTORY_DAYS)
                 if df.empty:
                     continue
-                
-                # Поиск уровней сопротивления
+
+                # фильтр нисходящего тренда (ниже EMA200)
+                if self.config.EXCLUDE_BELOW_EMA200 and len(df) >= 210:
+                    ema200 = self.data_manager.calculate_ema(df['close'], 200)
+                    if df['close'].iloc[-1] < ema200.iloc[-1]:
+                        continue
+
                 levels = self.resistance_analyzer.find_resistance_levels(df, symbol)
-                
-                if not levels.get('combined'):
+                combined = levels.get('combined', [])
+                if not combined:
                     continue
-                
-                # Проверка на пробой
-                breakout_info = self.breakout_detector.check_breakout(
-                    symbol, 
-                    levels['combined'], 
-                    df
-                )
-                
-                # Оценка потенциала
-                score = self._calculate_opportunity_score(
-                    symbol, levels['combined'], df, breakout_info
-                )
-                
+
+                breakout_info = self.breakout_detector.check_breakout(symbol, combined, df)
+
+                score = self._score_symbol(df, combined, breakout_info)
                 analysis_result['timeframes'][timeframe] = {
-                    'levels_count': len(levels['combined']),
-                    'nearest_level': levels['combined'][0] if levels['combined'] else None,
-                    'has_breakout': breakout_info is not None,
-                    'score': score
+                    'levels_count': len(combined),
+                    'has_breakout': bool(breakout_info),
+                    'score': score,
+                    'breakout_info': breakout_info
                 }
-                
+
                 if score > max_score:
                     max_score = score
                     best_opportunity = {
                         'symbol': symbol,
-                        'timeframe': timeframe,
-                        'levels': levels['combined'][:3],  # Топ-3 уровня
-                        'breakout_info': breakout_info,
                         'score': score,
-                        'current_price': df['close'].iloc[-1],
-                        'volume_24h': df['volume'].tail(96).sum() if timeframe == '15m' else None
+                        'timeframe': timeframe,
+                        'breakout_info': breakout_info,
+                        'levels': combined
                     }
-            
-            # Добавление в снимок рынка
+
             self.market_snapshot[symbol] = analysis_result
-            
             return best_opportunity
-            
         except Exception as e:
-            logger.error(f"Ошибка при анализе {symbol}: {e}")
+            logger.error(f"Ошибка анализа {symbol}: {e}")
             return None
-    
-    def _calculate_opportunity_score(self, symbol: str, levels: List[Dict], 
-                                    df: pd.DataFrame, 
-                                    breakout_info: Optional[Dict]) -> float:
-        """
-        Расчет оценки потенциала торговой возможности
-        
-        Args:
-            symbol: Символ
-            levels: Уровни сопротивления
-            df: Данные
-            breakout_info: Информация о пробое
-        
-        Returns:
-            Оценка от 0 до 100
-        """
-        score = 0
+
+    def _score_symbol(self, df: pd.DataFrame, levels: List[Dict], breakout_info: Optional[Dict]) -> float:
+        score = 0.0
         current_price = df['close'].iloc[-1]
-        
-        # 1. Если есть подтвержденный пробой - максимальный приоритет
+
         if breakout_info:
             score += 50
-            score += breakout_info.get('confidence_score', 0) * 20
+            score += float(breakout_info.get('confidence_score', 0.0)) * 20
             return score
-        
-        # 2. Близость к уровню сопротивления
+
         if levels:
-            nearest_level = levels[0]
-            distance_percent = abs(nearest_level['distance_percent'])
-            
-            if distance_percent < 1:  # Очень близко к уровню
-                score += 30
-            elif distance_percent < 2:
-                score += 20
-            elif distance_percent < 3:
-                score += 10
-            
-            # Сила уровня
-            score += nearest_level['strength'] * 15
-        
-        # 3. Тренд и моментум
-        # RSI
-        rsi = self.data_manager.calculate_rsi(df['close'])
-        current_rsi = rsi.iloc[-1]
-        
-        if 50 < current_rsi < 70:  # Оптимальная зона
+            nearest = levels[0]
+            distance_percent = abs(nearest['distance_percent'])
+            if distance_percent < 1: score += 30
+            elif distance_percent < 2: score += 20
+            elif distance_percent < 3: score += 10
+            score += float(nearest['strength']) * 15
+
+        rsi = self.data_manager.calculate_rsi(df['close']).iloc[-1]
+        if 50 < rsi < 70:
             score += 10
-        elif 40 < current_rsi < 50:
+        elif rsi >= 70:
             score += 5
-        
-        # Тренд (цена выше MA50)
-        if len(df) >= 50:
-            ma50 = df['close'].rolling(50).mean().iloc[-1]
-            if current_price > ma50:
-                score += 10
-        
-        # 4. Объем
-        recent_volume = df['volume'].tail(10).mean()
-        avg_volume = df['volume'].mean()
-        
-        if recent_volume > avg_volume * 1.2:
-            score += 5
-        
-        # 5. Волатильность (предпочитаем среднюю)
-        volatility = df['close'].pct_change().std()
-        if 0.01 < volatility < 0.05:  # 1-5% волатильность
-            score += 5
-        
-        return min(score, 100)
-    
-    def get_breakout_map(self) -> Dict[str, List[Dict]]:
-        """
-        Построение карты потенциальных пробоев
-        
-        Returns:
-            Словарь с группировкой по таймфреймам
-        """
-        breakout_map = {tf: [] for tf in self.config.TIMEFRAMES}
-        
-        for opportunity in self.breakout_opportunities:
-            timeframe = opportunity.get('timeframe')
-            if timeframe:
-                breakout_map[timeframe].append({
-                    'symbol': opportunity['symbol'],
-                    'score': opportunity['score'],
-                    'nearest_level': opportunity['levels'][0] if opportunity.get('levels') else None,
-                    'current_price': opportunity.get('current_price'),
-                    'has_breakout': opportunity.get('breakout_info') is not None
-                })
-        
-        # Сортировка по оценке в каждом таймфрейме
-        for tf in breakout_map:
-            breakout_map[tf].sort(key=lambda x: x['score'], reverse=True)
-        
-        return breakout_map
-    
+
+        return score
+
     def get_market_summary(self) -> Dict:
-        """
-        Получение общей сводки по рынку
-        
-        Returns:
-            Сводная информация
-        """
         total_analyzed = len(self.market_snapshot)
-        with_levels = sum(
-            1 for s in self.market_snapshot.values() 
-            if any(tf.get('levels_count', 0) > 0 for tf in s['timeframes'].values())
-        )
-        with_breakouts = sum(
-            1 for s in self.market_snapshot.values()
-            if any(tf.get('has_breakout', False) for tf in s['timeframes'].values())
-        )
-        
-        top_opportunities = self.breakout_opportunities[:5] if self.breakout_opportunities else []
-        
+        with_levels = sum(1 for s in self.market_snapshot.values()
+                          if any(tf.get('levels_count', 0) > 0 for tf in s['timeframes'].values()))
+        with_breakouts = sum(1 for s in self.market_snapshot.values()
+                             if any(tf.get('has_breakout', False) for tf in s['timeframes'].values()))
+
+        top_opps = self.breakout_opportunities[:5] if self.breakout_opportunities else []
         return {
             'timestamp': datetime.now(),
             'total_analyzed': total_analyzed,
@@ -260,28 +128,22 @@ class MarketScanner:
             'active_breakouts': with_breakouts,
             'top_opportunities': [
                 {
-                    'symbol': opp['symbol'],
-                    'score': opp['score'],
-                    'timeframe': opp.get('timeframe'),
-                    'action': 'BUY' if opp.get('breakout_info') else 'WATCH'
-                }
-                for opp in top_opportunities
+                    'symbol': o['symbol'],
+                    'timeframe': o.get('timeframe', ''),
+                    'score': o['score'],
+                    'action': 'BUY' if o.get('breakout_info') else 'WATCH',
+                    # пробуем вытащить вероятность из breakout_info, если она есть
+                    'arf_proba': (o.get('breakout_info') or {}).get('arf_proba')
+                } for o in top_opps
             ],
             'market_strength': self._calculate_market_strength()
         }
-    
+
     def _calculate_market_strength(self) -> str:
-        """Оценка общей силы рынка"""
         if not self.breakout_opportunities:
-            return "WEAK"
-        
-        avg_score = np.mean([opp['score'] for opp in self.breakout_opportunities])
-        
-        if avg_score > 70:
-            return "VERY_STRONG"
-        elif avg_score > 50:
-            return "STRONG"
-        elif avg_score > 30:
-            return "NEUTRAL"
-        else:
-            return "WEAK"
+            return 'WEAK'
+        avg = np.mean([o['score'] for o in self.breakout_opportunities])
+        if avg > 70: return 'VERY_STRONG'
+        if avg > 50: return 'STRONG'
+        if avg > 30: return 'NEUTRAL'
+        return 'WEAK'
